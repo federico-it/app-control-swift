@@ -115,8 +115,10 @@ public actor AppControl {
         }
     }
 
-    /// Yields the status at once, then checks again every `checkAfter` seconds (at least 30)
-    /// and yields only when the answer changes. Stops when the consuming task is cancelled.
+    /// Asks the server at once (never reusing an earlier answer, so each launch and each return to the
+    /// foreground sees the latest status), then checks again every `checkAfter` seconds (at least 30)
+    /// and yields only when the answer changes. Offline, the first value is the cached answer.
+    /// Stops when the consuming task is cancelled.
     ///
     /// Consume it only while the app is in the foreground, for example in SwiftUI:
     ///
@@ -130,8 +132,11 @@ public actor AppControl {
         AsyncStream { continuation in
             let task = Task { [self] in
                 var previous: AppStatus?
+                var first = true
                 while !Task.isCancelled {
-                    let status = await self.status()
+                    // The first check skips the reuse window: the app was just opened or brought back.
+                    let status = await self.status(force: first)
+                    first = false
                     if Task.isCancelled { break }
                     // Yields only when the content changes.
                     if previous.map({ !$0.hasSameContent(as: status) }) ?? true { continuation.yield(status) }

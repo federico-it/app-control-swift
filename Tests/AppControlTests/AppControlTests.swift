@@ -317,6 +317,26 @@ final class AppControlTests: XCTestCase {
         XCTAssertEqual(first?.update, .available)
     }
 
+    func testStatusUpdatesAsksTheServerEvenWithAFreshAnswer() async {
+        StubProtocol.handler = Self.ok()
+        let client = makeClient()
+        _ = await client.status()
+        XCTAssertEqual(StubProtocol.requests.count, 1)
+        // Reopening the app (a new statusUpdates) must not reuse the answer still within checkAfter.
+        var iterator = client.statusUpdates().makeAsyncIterator()
+        _ = await iterator.next()
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+    }
+
+    func testStatusUpdatesAfterRelaunchAsksTheServer() async {
+        StubProtocol.handler = Self.ok()
+        _ = await makeClient().status()
+        var iterator = makeClient().statusUpdates().makeAsyncIterator()
+        let first = await iterator.next()
+        XCTAssertEqual(StubProtocol.requests.count, 2)
+        XCTAssertEqual(first?.source, .network)
+    }
+
     // MARK: Legal
 
     static let legalBody = body.replacingOccurrences(of: "\"legal\": []", with: """

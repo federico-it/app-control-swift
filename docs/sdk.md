@@ -43,8 +43,10 @@ The SDKs flatten `minimum` to a string (`"2.2.0"`) and add `source` (`network`, 
 - **Cache:** the last 200 body plus its `ETag`, per key. A 304 returns the cached body, marked `network`. A
   cached answer made for another version, build, channel or locale is not reused.
 - **`checkAfter`:** `status()` reuses the cached answer while it is younger than `checkAfter` seconds, unless
-  forced. The watching helpers (`statusUpdates()` in Swift, `subscribe()` in JS) wait `checkAfter` between
-  calls (at least 30 s), only while the app is in the foreground or the page visible.
+  forced. The watching helpers (`statusUpdates()` in Swift, `subscribe()` in JS) always ask the server when they
+  start, that is on each launch and each return to the foreground or to a visible page (an unchanged answer
+  costs a 304), then wait `checkAfter` between calls (at least 30 s), only while the app is in the foreground
+  or the page visible.
 - **Installation id:** a random UUID made once and stored. It is the rollout bucket, so an installation stays
   on the same side of a gradual rollout.
 - **Installation label:** when the request has an installation id, the answer carries `installation`, a short
@@ -70,6 +72,31 @@ The SDKs flatten `minimum` to a string (`"2.2.0"`) and add `source` (`network`, 
 The SwiftUI `.appControlGate(appControl)` modifier does all of this but the label; on the web, the JavaScript
 client's README has a React example.
 
+## Integration guidelines
+
+Follow these in every app (the AI prompts in app-control's Integrate dialog say the same):
+
+1. **Use the app's design system.** The update and maintenance screens must look like the rest of the app: its
+   colours and theme (light and dark), typography, components (buttons, banners, sheets, full-screen states) and
+   localisation. The ready-made SwiftUI `.appControlGate` has a neutral look: keep it only in apps without a
+   design system of their own; otherwise build the screens with the app's components and drive them from
+   `statusUpdates()` (Swift) or `subscribe()` (JS), as in the table above.
+2. **Show the version and the installation label in Settings.** Always show the app's version and build
+   ("Version 1.2.0 (45)", read from the app, never hard-coded) in the Settings screen, or in the profile or
+   account page when there is no Settings screen; if it's not clear where, ask the app's owner rather than adding
+   a new screen. Next to it, the installation label ("ID a1b2c3d4", selectable or copied on tap), styled like the
+   app's other secondary rows.
+3. **Keep the SDK's checks and cache.** Don't add your own cache, timers, polling or retries:
+   - the SDK stores the last answer and its ETag (an unchanged answer costs a 304), and offline returns the cached
+     answer or a neutral one; it never throws;
+   - `statusUpdates()` / `subscribe()` ask the server when they start (each launch and each return to the
+     foreground or to a visible page), then every `checkAfter` seconds, only while the app is in the foreground;
+     start them at the app root, once;
+   - elsewhere, `status()` reuses the fresh answer; `force: true` only behind an explicit user action
+     ("Check again");
+   - never block launch or show a loader for the status: render the app at once, show the screens when the
+     answer arrives.
+
 ## Testing on a device
 
 To see the update and maintenance screens on a real device without publishing anything:
@@ -80,12 +107,13 @@ To see the update and maintenance screens on a real device without publishing an
    and the duration (5–60 minutes), and start. A non-production environment can also be tested as a whole.
 3. Open the app on that device or bring it to the foreground. The answer keeps the same keys with test values:
    update `9999.0.0` (also the minimum when required) or a blocking maintenance until the test ends.
-   `checkAfter` is at most the time left, so the app returns to normal by itself soon after the end, or as soon
-   as the test is stopped and the app asks again.
+   While a test applies, `checkAfter` is 30 seconds, so the app returns to normal within 30 seconds of the
+   test's end or stop.
 
-The SDKs need no change: a cached answer is reused for up to `checkAfter` seconds, so force a check (or relaunch)
-if the app asked just before the test started.
+The SDKs need no change. With Swift 0.3.1 and later (and the JS client), the app asks again each time it is
+opened or brought back to the foreground, so starting or stopping a test shows up at once there.
 
+## Legal documents
 
 The app's legal documents in force (privacy, terms, cookie, EULA) come in the status answer, in `LEGAL_KINDS`
 order and in the requested locale.

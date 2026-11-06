@@ -5,14 +5,14 @@ iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1. No dependencies.
 
 - **One call:** `GET /api/v1/public/status` with the environment's public key.
 - **Never blocks, never throws:** 5 s timeout; on any failure you get the last cached answer (`source: .cache`) or a neutral one (`update: .none`, `source: .default`).
-- **Cheap:** the last answer and its `ETag` are stored; an unchanged answer costs a 304. Within `checkAfter` seconds the answer is reused without a request.
+- **Cheap:** the last answer and its `ETag` are stored; an unchanged answer costs a 304. Within `checkAfter` seconds `status()` reuses the answer without a request; opening the app or bringing it back always asks the server.
 
 ## Install
 
 Swift Package Manager, in Xcode (File → Add Package Dependencies…) or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.3.0"),
+.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.3.1"),
 ```
 
 The package is developed in the app-control monorepo (`sdks/swift`) and published to
@@ -47,7 +47,7 @@ Every argument but `key` is optional:
 | `defaults` | `UserDefaults.standard` |
 | `session` | an ephemeral session with a 5 s timeout |
 
-To keep the status fresh, `statusUpdates()` yields at once, then checks every `checkAfter` seconds (at least 30) and yields only when the answer changes. Consume it while the app is active:
+To keep the status fresh, `statusUpdates()` asks the server at once (each launch and each return to the foreground, never reusing an earlier answer), then checks every `checkAfter` seconds (at least 30) and yields only when the answer changes. Consume it while the app is active:
 
 ```swift
 .task(id: scenePhase) {
@@ -58,7 +58,28 @@ To keep the status fresh, `statusUpdates()` yields at once, then checks every `c
 
 ## SwiftUI gate
 
-One modifier does the whole job:
+One modifier does the whole job, with a neutral look. **If the app has its own design system, build the
+screens with its components instead** and drive them from `statusUpdates()` (see the
+[integration guidelines](https://github.com/federico-it/app-control-swift/blob/main/docs/sdk.md#integration-guidelines)):
+
+```swift
+struct AppStatusGate: ViewModifier {
+    let appControl: AppControl
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var status: AppStatus?
+
+    func body(content: Content) -> some View {
+        content
+            .overlay { if let status { AppStatusScreens(status: status) } } // your own views
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
+                for await next in appControl.statusUpdates() { status = next }
+            }
+    }
+}
+```
+
+The ready-made gate:
 
 ```swift
 @main
@@ -125,6 +146,6 @@ swift test
 
 ## Documentation
 
-- [SDK overview: the status endpoint, what the app should show, legal documents](docs/sdk.md)
+- [SDK overview: the status endpoint, what the app should show, integration guidelines, legal documents](docs/sdk.md)
 - [API tokens: scopes, roles, CI recipes](docs/api-tokens.md)
 - [Webhooks: Slack, Discord and signed URLs](docs/webhooks.md)
