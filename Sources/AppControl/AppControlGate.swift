@@ -17,10 +17,20 @@ public struct AppControlGateTexts: Sendable, Equatable {
     public var maintenanceBannerTitle: String
     public var retryButton: String
     public var dismissButton: String
+    /// The title of the legal acceptance sheet (`legal: true`).
+    public var legalTitle: String
+    public var legalMessage: String
+    /// Shown under each document's title, with `{version}`.
+    public var legalVersion: String
+    public var legalAcceptButton: String
 
     public init(updateRequiredTitle: String, updateRequiredMessage: String, updateAvailableTitle: String, updateAvailableMessage: String,
                 updateButton: String, maintenanceTitle: String, maintenanceMessage: String, maintenanceUntil: String,
-                maintenanceBannerTitle: String, retryButton: String, dismissButton: String) {
+                maintenanceBannerTitle: String, retryButton: String, dismissButton: String,
+                legalTitle: String = "Before you continue",
+                legalMessage: String = "Please read and accept the following documents to keep using the app.",
+                legalVersion: String = "Version {version}",
+                legalAcceptButton: String = "Accept") {
         self.updateRequiredTitle = updateRequiredTitle
         self.updateRequiredMessage = updateRequiredMessage
         self.updateAvailableTitle = updateAvailableTitle
@@ -32,6 +42,10 @@ public struct AppControlGateTexts: Sendable, Equatable {
         self.maintenanceBannerTitle = maintenanceBannerTitle
         self.retryButton = retryButton
         self.dismissButton = dismissButton
+        self.legalTitle = legalTitle
+        self.legalMessage = legalMessage
+        self.legalVersion = legalVersion
+        self.legalAcceptButton = legalAcceptButton
     }
 
     public static let english = AppControlGateTexts(
@@ -59,7 +73,11 @@ public struct AppControlGateTexts: Sendable, Equatable {
         maintenanceUntil: "Torniamo entro {date}.",
         maintenanceBannerTitle: "Manutenzione in corso",
         retryButton: "Riprova",
-        dismissButton: "Chiudi"
+        dismissButton: "Chiudi",
+        legalTitle: "Prima di continuare",
+        legalMessage: "Leggi e accetta i documenti seguenti per continuare a usare l'app.",
+        legalVersion: "Versione {version}",
+        legalAcceptButton: "Accetto"
     )
 
     /// Italian when the user's preferred language is Italian, else English.
@@ -80,13 +98,17 @@ extension View {
     /// Blocks the app for a required update or a blocking maintenance (full screen), and shows a
     /// dismissible banner for an available update or a non-blocking maintenance.
     /// Checks while the scene is active and again whenever it becomes active.
-    public func appControlGate(_ client: AppControl, texts: AppControlGateTexts = .automatic) -> some View {
-        modifier(AppControlGateModifier(client: client, texts: texts))
+    ///
+    /// With `legal: true` it also shows a sheet the user cannot dismiss, listing the legal documents
+    /// with `needsAcceptance`, with links to read them and an "Accept" button that calls `accept(_:)`.
+    public func appControlGate(_ client: AppControl, legal: Bool = false, texts: AppControlGateTexts = .automatic) -> some View {
+        modifier(AppControlGateModifier(client: client, legal: legal, texts: texts))
     }
 }
 
 struct AppControlGateModifier: ViewModifier {
     let client: AppControl
+    let legal: Bool
     let texts: AppControlGateTexts
 
     @Environment(\.scenePhase) private var scenePhase
@@ -96,6 +118,13 @@ struct AppControlGateModifier: ViewModifier {
     @AppStorage("appcontrol.gate.dismissedUpdate") private var dismissedUpdate = ""
     /// The non-blocking maintenance the user dismissed (by start), for this session.
     @State private var dismissedMaintenance: Date?
+    /// Documents accepted in this session: the sheet closes at once, while `accept` runs.
+    @State private var acceptedHere: Set<String> = []
+
+    private var documentsToAccept: [LegalDocument] {
+        guard legal, !isBlocked, let status else { return [] }
+        return status.pendingLegal.filter { !acceptedHere.contains($0.id) }
+    }
 
     private var blockingMaintenance: Maintenance? {
         guard let maintenance = status?.maintenance, maintenance.blocking else { return nil }
@@ -168,6 +197,17 @@ struct AppControlGateModifier: ViewModifier {
                     )
                 }
             }
+            .sheet(isPresented: Binding(get: { !documentsToAccept.isEmpty }, set: { _ in })) {
+                LegalSheet(documents: documentsToAccept, texts: texts) {
+                    let documents = documentsToAccept
+                    acceptedHere.formUnion(documents.map(\.id))
+                    Task {
+                        for document in documents { await client.accept(document) }
+                        status = await client.status()
+                    }
+                }
+                .interactiveDismissDisabled(true)
+            }
             .task(id: scenePhase) {
                 guard scenePhase == .active else { return }
                 for await next in client.statusUpdates() {
@@ -180,6 +220,47 @@ struct AppControlGateModifier: ViewModifier {
         var lines = [maintenance.message ?? texts.maintenanceMessage]
         if let end = maintenance.endsAt { lines.append(texts.fill(texts.maintenanceUntil, date: end)) }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// The legal documents to accept, each with a link to its page, and one "Accept" button.
+private struct LegalSheet: View {
+    let documents: [LegalDocument]
+    let texts: AppControlGateTexts
+    let accept: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(texts.legalTitle)
+                    .font(.title2.bold())
+                    .accessibilityAddTraits(.isHeader)
+                Text(texts.legalMessage)
+                    .foregroundStyle(.secondary)
+                ForEach(documents) { document in
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let url = document.url {
+                            Link(destination: url) {
+                                Label(document.title, systemImage: "doc.text")
+                            }
+                            .font(.headline)
+                        } else {
+                            Label(document.title, systemImage: "doc.text").font(.headline)
+                        }
+                        Text(texts.fill(texts.legalVersion, version: String(document.version)))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Button(texts.legalAcceptButton, action: accept)
+                    .gateProminentButton()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+            }
+            .padding(24)
+            .frame(maxWidth: 480, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
     }
 }
 

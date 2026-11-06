@@ -77,10 +77,61 @@ struct MyApp: App {
 - **Available update** or **non-blocking maintenance:** a dismissible banner. A dismissed update stays hidden until a newer version comes.
 - It checks again whenever the scene becomes active.
 - Texts are built in for English and Italian; pass your own with `.appControlGate(appControl, texts: AppControlGateTexts(…))` or adjust `AppControlGateTexts.english`.
+- With `legal: true` it also asks the user to accept legal documents (see below).
+
+## Legal documents
+
+`status.legal` lists the app's published documents (privacy, terms, cookie, EULA) in the requested locale: `kind`, `version`, `title`, `url` (the hosted page), `updatedAt`, `requiresAcceptance` and `needsAcceptance`. `status.pendingLegal` is the subset with `needsAcceptance == true`: a new version that requires acceptance, or none accepted yet on this installation.
+
+```swift
+for document in status.pendingLegal {
+    // show document.title, link document.url, then when the user accepts:
+    await appControl.accept(document)
+}
+```
+
+`accept(_:)` posts the kind, version, installation id, platform, locale and app version. It never throws: offline, the acceptance is kept in `UserDefaults` and sent again before the next `status()` that asks the server. Either way, `status()` and `statusUpdates()` report `needsAcceptance == false` from then on, so the app doesn't ask again.
+
+The gate can do it for you:
+
+```swift
+ContentView().appControlGate(appControl, legal: true)
+```
+
+It shows a sheet the user cannot dismiss, listing the documents to accept with links to read them and one "Accept" button. The texts (`legalTitle`, `legalMessage`, `legalVersion`, `legalAcceptButton`) are in English and Italian and can be overridden through `AppControlGateTexts`. The sheet waits while a required update or a blocking maintenance is on screen.
+
+### Installation id for GDPR requests
+
+Only a hash of the installation id is stored with an acceptance. To see or erase a user's acceptances, the admin needs that id, so let the user find it without cluttering the UI: 5 taps within about 3 seconds on the label that shows the app version reveal `installationId()` with a Copy button.
+
+```swift
+struct VersionLabel: View {
+    let appControl: AppControl
+    @State private var taps: [Date] = []
+    @State private var installationId: String?
+
+    var body: some View {
+        Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
+            .onTapGesture {
+                let now = Date()
+                taps = taps.filter { now.timeIntervalSince($0) < 3 } + [now]
+                guard taps.count >= 5 else { return }
+                taps = []
+                Task { installationId = await appControl.installationId() }
+            }
+            .alert("Installation ID", isPresented: .constant(installationId != nil), presenting: installationId) { id in
+                Button("Copy") { UIPasteboard.general.string = id; installationId = nil } // iOS; NSPasteboard on macOS
+                Button("Close", role: .cancel) { installationId = nil }
+            } message: { id in
+                Text("\(id)\n\nShare it with us to see or erase your data.")
+            }
+    }
+}
+```
 
 ## Privacy
 
-The SDK sends the app's version, build, channel, language, platform and system version, plus a random installation id made on the first run. That id is never linked to the user, the device or an advertising id; it only places the installation in a rollout bucket. The SDK stores nothing else on the device but that id and the last answer, and collects no IP address or user data.
+The SDK sends the app's version, build, channel, language, platform and system version, plus a random installation id made on the first run. That id is never linked to the user, the device or an advertising id; it only places the installation in a rollout bucket. The SDK stores nothing else on the device but that id, the last answer and the acceptances not yet delivered, and collects no IP address or user data. An acceptance adds the document's kind and version; the server keeps only a hash of the installation id.
 
 A sentence for your privacy policy: *"To tell you about updates and maintenance, the app sends its version and a random installation identifier to our update service. This identifier is not linked to you or your device."*
 

@@ -112,6 +112,73 @@ public struct Maintenance: Codable, Sendable, Equatable {
     }
 }
 
+/// A published legal document of the app (privacy policy, terms, cookie policy, EULA).
+public struct LegalDocument: Codable, Sendable, Equatable, Hashable, Identifiable {
+    /// `privacy`, `terms`, `cookie` or `eula` (a string, so a new kind never breaks decoding).
+    public var kind: String
+    /// The version in force: 1, 2, 3…
+    public var version: Int
+    /// The title in the requested locale.
+    public var title: String
+    /// The hosted page in the requested locale.
+    public var url: URL?
+    /// When this version was published.
+    public var updatedAt: Date?
+    /// Installations must accept this document (this version or an earlier one that had the flag).
+    public var requiresAcceptance: Bool
+    /// `true`: this installation has to accept this version. `nil` when the server could not tell.
+    public var needsAcceptance: Bool?
+
+    public var id: String { "\(kind)#\(version)" }
+
+    public init(kind: String, version: Int, title: String, url: URL? = nil, updatedAt: Date? = nil,
+                requiresAcceptance: Bool = false, needsAcceptance: Bool? = nil) {
+        self.kind = kind
+        self.version = version
+        self.title = title
+        self.url = url
+        self.updatedAt = updatedAt
+        self.requiresAcceptance = requiresAcceptance
+        self.needsAcceptance = needsAcceptance
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, version, title, url, updatedAt, requiresAcceptance, needsAcceptance }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard let kind = c.lenientString(.kind), !kind.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: c, debugDescription: "Missing kind")
+        }
+        guard let version = (try? c.decodeIfPresent(Int.self, forKey: .version)) ?? nil, version >= 1 else {
+            throw DecodingError.dataCorruptedError(forKey: .version, in: c, debugDescription: "Invalid version")
+        }
+        self.kind = kind
+        self.version = version
+        title = c.lenientString(.title) ?? kind
+        url = c.lenientString(.url).flatMap(URL.init(string:))
+        updatedAt = c.lenientDate(.updatedAt)
+        requiresAcceptance = ((try? c.decodeIfPresent(Bool.self, forKey: .requiresAcceptance)) ?? nil) ?? false
+        needsAcceptance = (try? c.decodeIfPresent(Bool.self, forKey: .needsAcceptance)) ?? nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(version, forKey: .version)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(url?.absoluteString, forKey: .url)
+        try c.encodeIfPresent(updatedAt.map(ISODate.format), forKey: .updatedAt)
+        try c.encode(requiresAcceptance, forKey: .requiresAcceptance)
+        try c.encodeIfPresent(needsAcceptance, forKey: .needsAcceptance)
+    }
+}
+
+/// Decodes an element or `nil`, so one malformed element doesn't fail the whole array.
+private struct Lossy<Value: Decodable>: Decodable {
+    var value: Value?
+    init(from decoder: Decoder) throws { value = try? Value(from: decoder) }
+}
+
 /// The answer of `GET /api/v1/public/status`, plus where it comes from.
 public struct AppStatus: Codable, Sendable, Equatable {
     public var update: Update
@@ -123,6 +190,9 @@ public struct AppStatus: Codable, Sendable, Equatable {
     public var maintenance: Maintenance?
     /// The next window starting within 7 days.
     public var upcomingMaintenance: Maintenance?
+    /// The app's published legal documents. Show the ones with `needsAcceptance == true` and call
+    /// `AppControl.accept(_:)` when the user accepts.
+    public var legal: [LegalDocument]
     /// Seconds to wait before asking again.
     public var checkAfter: Int
     public var source: Source
@@ -130,12 +200,13 @@ public struct AppStatus: Codable, Sendable, Equatable {
     public var fetchedAt: Date
 
     public init(update: Update = .none, latest: Release? = nil, minimum: String? = nil, maintenance: Maintenance? = nil,
-                upcomingMaintenance: Maintenance? = nil, checkAfter: Int = 300, source: Source = .network, fetchedAt: Date = Date()) {
+                upcomingMaintenance: Maintenance? = nil, legal: [LegalDocument] = [], checkAfter: Int = 300, source: Source = .network, fetchedAt: Date = Date()) {
         self.update = update
         self.latest = latest
         self.minimum = minimum
         self.maintenance = maintenance
         self.upcomingMaintenance = upcomingMaintenance
+        self.legal = legal
         self.checkAfter = checkAfter
         self.source = source
         self.fetchedAt = fetchedAt
@@ -148,14 +219,17 @@ public struct AppStatus: Codable, Sendable, Equatable {
 
     static let defaultCheckAfter = 300
 
+    /// The documents this installation still has to accept.
+    public var pendingLegal: [LegalDocument] { legal.filter { $0.needsAcceptance == true } }
+
     /// True when both answers say the same thing (ignoring `source` and `fetchedAt`).
     public func hasSameContent(as other: AppStatus) -> Bool {
         update == other.update && latest == other.latest && minimum == other.minimum && maintenance == other.maintenance
-            && upcomingMaintenance == other.upcomingMaintenance && checkAfter == other.checkAfter
+            && upcomingMaintenance == other.upcomingMaintenance && legal == other.legal && checkAfter == other.checkAfter
     }
 
     private enum CodingKeys: String, CodingKey {
-        case update, latest, minimum, maintenance, upcomingMaintenance, checkAfter, source, fetchedAt
+        case update, latest, minimum, maintenance, upcomingMaintenance, legal, checkAfter, source, fetchedAt
     }
 
     private struct MinimumObject: Decodable { var version: String }
@@ -172,6 +246,7 @@ public struct AppStatus: Codable, Sendable, Equatable {
         }
         maintenance = (try? c.decodeIfPresent(Maintenance.self, forKey: .maintenance)) ?? nil
         upcomingMaintenance = (try? c.decodeIfPresent(Maintenance.self, forKey: .upcomingMaintenance)) ?? nil
+        legal = ((try? c.decodeIfPresent([Lossy<LegalDocument>].self, forKey: .legal)) ?? nil)?.compactMap(\.value) ?? []
         let seconds = (try? c.decodeIfPresent(Int.self, forKey: .checkAfter)) ?? nil
         checkAfter = seconds.map { max($0, 0) } ?? AppStatus.defaultCheckAfter
         source = ((try? c.decodeIfPresent(Source.self, forKey: .source)) ?? nil) ?? .network
@@ -185,6 +260,7 @@ public struct AppStatus: Codable, Sendable, Equatable {
         try c.encodeIfPresent(minimum, forKey: .minimum)
         try c.encodeIfPresent(maintenance, forKey: .maintenance)
         try c.encodeIfPresent(upcomingMaintenance, forKey: .upcomingMaintenance)
+        try c.encode(legal, forKey: .legal)
         try c.encode(checkAfter, forKey: .checkAfter)
         try c.encode(source, forKey: .source)
         try c.encode(ISODate.format(fetchedAt), forKey: .fetchedAt)

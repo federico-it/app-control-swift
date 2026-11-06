@@ -316,4 +316,182 @@ final class AppControlTests: XCTestCase {
         let first = await iterator.next()
         XCTAssertEqual(first?.update, .available)
     }
+
+    // MARK: Legal
+
+    static let legalBody = body.replacingOccurrences(of: "\"legal\": []", with: """
+    "legal": [
+      { "kind": "privacy", "version": 3, "title": "Privacy policy", "url": "https://example.test/legal/app/privacy/it",
+        "updatedAt": "2026-11-01T09:00:00.000Z", "requiresAcceptance": true, "needsAcceptance": true },
+      { "kind": "terms", "version": 1, "title": "Terms", "url": "https://example.test/legal/app/terms/it",
+        "updatedAt": "2026-10-01T09:00:00.000Z", "requiresAcceptance": false, "needsAcceptance": false }
+    ]
+    """)
+
+    static func bodyData(_ request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
+    static func isAcceptance(_ request: URLRequest) -> Bool {
+        request.url?.path.hasSuffix("/api/v1/public/legal/acceptances") == true
+    }
+
+    /// Status requests get `statusBody`; acceptances get `acceptanceStatus` (nil: offline).
+    static func legalHandler(statusBody: String = legalBody, acceptanceStatus: Int?) -> StubProtocol.Handler {
+        { request in
+            if isAcceptance(request) {
+                guard let code = acceptanceStatus else { throw URLError(.notConnectedToInternet) }
+                return (code, [:], Data(#"{"kind":"privacy","version":3,"acceptedAt":"2026-11-06T10:00:00.000Z"}"#.utf8))
+            }
+            return (200, ["ETag": "W/\"legal\""], Data(statusBody.utf8))
+        }
+    }
+
+    func testDecodesLegalDocuments() throws {
+        let status = try AppControl.decode(Data(Self.legalBody.utf8))
+        XCTAssertEqual(status.legal.count, 2)
+        let privacy = status.legal[0]
+        XCTAssertEqual(privacy.kind, "privacy")
+        XCTAssertEqual(privacy.version, 3)
+        XCTAssertEqual(privacy.title, "Privacy policy")
+        XCTAssertEqual(privacy.url, URL(string: "https://example.test/legal/app/privacy/it"))
+        XCTAssertEqual(privacy.updatedAt, ISODate.parse("2026-11-01T09:00:00Z"))
+        XCTAssertTrue(privacy.requiresAcceptance)
+        XCTAssertEqual(privacy.needsAcceptance, true)
+        XCTAssertEqual(status.pendingLegal.map(\.kind), ["privacy"])
+    }
+
+    func testLegalDecodingIsTolerant() throws {
+        let json = """
+        { "update": "none", "legal": [
+          { "kind": "privacy", "version": 2, "needsAcceptance": null, "future": 1 },
+          { "kind": "terms", "version": "x" },
+          { "version": 1 },
+          "nonsense",
+          { "kind": "eula", "version": 1, "title": "EULA", "url": null, "requiresAcceptance": "yes" }
+        ] }
+        """
+        let status = try AppControl.decode(Data(json.utf8))
+        XCTAssertEqual(status.legal.map(\.kind), ["privacy", "eula"])
+        XCTAssertEqual(status.legal[0].title, "privacy")
+        XCTAssertNil(status.legal[0].needsAcceptance)
+        XCTAssertFalse(status.legal[1].requiresAcceptance)
+        XCTAssertNil(status.legal[1].url)
+
+        let notAnArray = try AppControl.decode(Data(#"{ "legal": { "kind": "privacy" } }"#.utf8))
+        XCTAssertEqual(notAnArray.legal, [])
+    }
+
+    func testAcceptEncodesTheRequest() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: 201)
+        let client = makeClient()
+        let status = await client.status()
+        await client.accept(try XCTUnwrap(status.pendingLegal.first))
+
+        let request = try XCTUnwrap(StubProtocol.requests.first(where: Self.isAcceptance))
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.absoluteString, "https://example.test/base/api/v1/public/legal/acceptances")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        let body = try JSONDecoder().decode(AppControl.AcceptanceBody.self, from: XCTUnwrap(Self.bodyData(request)))
+        let installation = await client.installationId()
+        XCTAssertEqual(body, AppControl.AcceptanceBody(key: Self.key, installation: installation, kind: "privacy", version: 3,
+                                                       platform: "macos", locale: "it-IT", appVersion: "2.3.1"))
+        let pending = await client.pendingAcceptanceCount()
+        XCTAssertEqual(pending, 0)
+    }
+
+    func testAcceptUpdatesTheCachedStatus() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: 201)
+        let client = makeClient()
+        let before = await client.status()
+        XCTAssertEqual(before.pendingLegal.count, 1)
+        await client.accept(before.pendingLegal[0])
+
+        // Within checkAfter: the reused answer no longer asks.
+        let after = await client.status()
+        XCTAssertEqual(StubProtocol.requests.filter { !Self.isAcceptance($0) }.count, 1)
+        XCTAssertEqual(after.legal.first?.needsAcceptance, false)
+        XCTAssertTrue(after.pendingLegal.isEmpty)
+        // After a relaunch too.
+        let relaunched = await makeClient().status()
+        XCTAssertTrue(relaunched.pendingLegal.isEmpty)
+    }
+
+    func testOfflineAcceptanceIsQueuedAndRetriedOnTheNextStatus() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: nil)
+        let client = makeClient()
+        let fetched = await client.status()
+        let document = try XCTUnwrap(fetched.pendingLegal.first)
+        await client.accept(document)
+
+        let queued = await client.pendingAcceptanceCount()
+        XCTAssertEqual(queued, 1)
+        let offline = await client.status()
+        XCTAssertTrue(offline.pendingLegal.isEmpty, "a queued acceptance already counts")
+
+        // Back online: the next status() that asks the server sends it first.
+        StubProtocol.handler = Self.legalHandler(
+            statusBody: Self.legalBody.replacingOccurrences(of: #""needsAcceptance": true"#, with: #""needsAcceptance": false"#),
+            acceptanceStatus: 201)
+        let countBefore = StubProtocol.requests.count
+        let online = await client.status(force: true)
+        let newRequests = StubProtocol.requests.dropFirst(countBefore)
+        XCTAssertEqual(newRequests.map(Self.isAcceptance), [true, false])
+        let remaining = await client.pendingAcceptanceCount()
+        XCTAssertEqual(remaining, 0)
+        XCTAssertTrue(online.pendingLegal.isEmpty)
+        let state = await client.readLegalState()
+        XCTAssertEqual(state, AppControl.LegalState(), "the server's answer reflects it: nothing kept")
+    }
+
+    func testRejectedAcceptanceIsDropped() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: 409)
+        let client = makeClient()
+        let fetched = await client.status()
+        let document = try XCTUnwrap(fetched.pendingLegal.first)
+        await client.accept(document)
+        let pending = await client.pendingAcceptanceCount()
+        XCTAssertEqual(pending, 0)
+        let status = await client.status()
+        XCTAssertEqual(status.pendingLegal.count, 1, "the server refused it: ask again")
+    }
+
+    func testAnAcceptanceOfAnOlderVersionDoesNotCoverANewerOne() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: nil)
+        let client = makeClient()
+        await client.accept(LegalDocument(kind: "privacy", version: 2, title: "Old"))
+        let status = await client.status()
+        XCTAssertEqual(status.pendingLegal.map(\.version), [3])
+    }
+
+    func testStatusUpdatesReflectsAnAcceptance() async throws {
+        StubProtocol.handler = Self.legalHandler(acceptanceStatus: 201)
+        let client = makeClient()
+        var iterator = client.statusUpdates().makeAsyncIterator()
+        let firstValue = await iterator.next()
+        let first = try XCTUnwrap(firstValue)
+        XCTAssertEqual(first.pendingLegal.count, 1)
+        await client.accept(first.pendingLegal[0])
+        let nextValue = await iterator.next()
+        let next = try XCTUnwrap(nextValue)
+        XCTAssertTrue(next.pendingLegal.isEmpty)
+    }
+
+    func testVersionPattern() {
+        XCTAssertTrue(AppControl.isValidVersion("2.3.1"))
+        XCTAssertTrue(AppControl.isValidVersion("v1"))
+        XCTAssertFalse(AppControl.isValidVersion("2.3.1-beta"))
+        XCTAssertFalse(AppControl.isValidVersion("0.1.2.3.4"))
+    }
 }
