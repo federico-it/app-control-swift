@@ -153,8 +153,8 @@ public actor AppControl {
     /// The short label of this installation, e.g. `a1b2c3d4` (8 hex characters), or `nil` before the
     /// first answer from the server.
     ///
-    /// It is the same label the app's Stats → Recent installations shows, so show it in the app's
-    /// Settings or About screen ("ID a1b2c3d4"): it's how the developer finds this device.
+    /// It is the same label the app's Stats → Recent installations shows: reveal it ("ID a1b2c3d4")
+    /// after 5 taps on the version row in Settings, so the developer can find this device.
     /// It is stored on the device and updated from each answer of the server, so reading it never
     /// waits for the network and works offline; it's `nonisolated`, so no `await` is needed:
     ///

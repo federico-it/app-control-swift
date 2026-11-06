@@ -67,7 +67,7 @@ The SDKs flatten `minimum` to a string (`"2.2.0"`) and add `source` (`network`, 
 | `maintenance.blocking: false` | A banner with the message. |
 | `upcomingMaintenance` | Optional: a heads-up banner with the start time. |
 | `source: "default"` | Nothing: the app runs normally. |
-| `installationLabel` | Show it in Settings or About as "ID a1b2c3d4": it's how the developer finds this device in Stats → Recent installations. |
+| `installationLabel` | Hidden: 5 taps on the version row in Settings reveal "ID a1b2c3d4". It's how the developer finds this device in Stats → Recent installations. |
 
 The SwiftUI `.appControlGate(appControl)` modifier does all of this but the label; on the web, the JavaScript
 client's README has a React example.
@@ -81,11 +81,12 @@ Follow these in every app (the AI prompts in app-control's Integrate dialog say 
    localisation. The ready-made SwiftUI `.appControlGate` has a neutral look: keep it only in apps without a
    design system of their own; otherwise build the screens with the app's components and drive them from
    `statusUpdates()` (Swift) or `subscribe()` (JS), as in the table above.
-2. **Show the version and the installation label in Settings.** Always show the app's version and build
-   ("Version 1.2.0 (45)", read from the app, never hard-coded) in the Settings screen, or in the profile or
-   account page when there is no Settings screen; if it's not clear where, ask the app's owner rather than adding
-   a new screen. Next to it, the installation label ("ID a1b2c3d4", selectable or copied on tap), styled like the
-   app's other secondary rows.
+2. **Show the version in Settings; 5 taps on it reveal the installation label.** Always show the app's version
+   and build ("Version 1.2.0 (45)", read from the app, never hard-coded) in the Settings screen, or in the profile
+   or account page when there is no Settings screen; if it's not clear where, ask the app's owner rather than
+   adding a new screen. The installation label stays hidden: **5 taps on the version row** reveal a row with
+   "ID a1b2c3d4" (selectable or copied on tap) until the screen closes. Nothing in the UI hints at it. Style both
+   rows like the app's other secondary rows.
 3. **Keep the SDK's checks and cache.** Don't add your own cache, timers, polling or retries:
    - the SDK stores the last answer and its ETag (an unchanged answer costs a 304), and offline returns the cached
      answer or a neutral one; it never throws;
@@ -101,7 +102,7 @@ Follow these in every app (the AI prompts in app-control's Integrate dialog say 
 
 To see the update and maintenance screens on a real device without publishing anything:
 
-1. Show the installation label in the app's Settings or About screen ("ID a1b2c3d4", see above).
+1. In the app's Settings, tap the version row 5 times to reveal the installation label ("ID a1b2c3d4", see above).
 2. In app-control, open the app's **Versions → Test in app**, enter that label (or pick the device from Stats →
    Recent installations), choose the environment, the kind (update available, update required, maintenance)
    and the duration (5–60 minutes), and start. A non-production environment can also be tested as a whole.

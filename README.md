@@ -101,12 +101,16 @@ struct MyApp: App {
 
 ## Installation label
 
-`appControl.installationLabel` is a short label for this installation, e.g. `a1b2c3d4` (8 hex characters), or `nil` before the first answer from the server. It's the label the app's **Stats → Recent installations** shows, so it's how you find this device there. Show it in the app's Settings or About screen:
+`appControl.installationLabel` is a short label for this installation, e.g. `a1b2c3d4` (8 hex characters), or `nil` before the first answer from the server. It's the label the app's **Stats → Recent installations** shows, so it's how you find this device there. Keep it hidden: 5 taps on the version row in Settings reveal it.
 
 ```swift
+@State private var versionTaps = 0
+
 Section("About") {
     Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
-    if let label = appControl.installationLabel {
+        .contentShape(Rectangle())
+        .onTapGesture { versionTaps += 1 }
+    if versionTaps >= 5, let label = appControl.installationLabel {
         Text("ID \(label)").font(.footnote.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
     }
 }
