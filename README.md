@@ -12,7 +12,7 @@ iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1. No dependencies.
 Swift Package Manager, in Xcode (File → Add Package Dependencies…) or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.1.0"),
+.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.3.0"),
 ```
 
 The package is developed in the app-control monorepo (`sdks/swift`) and published to
@@ -77,63 +77,43 @@ struct MyApp: App {
 - **Available update** or **non-blocking maintenance:** a dismissible banner. A dismissed update stays hidden until a newer version comes.
 - It checks again whenever the scene becomes active.
 - Texts are built in for English and Italian; pass your own with `.appControlGate(appControl, texts: AppControlGateTexts(…))` or adjust `AppControlGateTexts.english`.
-- With `legal: true` it also asks the user to accept legal documents (see below).
 
-## Legal documents
+## Installation label
 
-`status.legal` lists the app's published documents (privacy, terms, cookie, EULA) in the requested locale: `kind`, `version`, `title`, `url` (the hosted page), `updatedAt`, `requiresAcceptance` and `needsAcceptance`. `status.pendingLegal` is the subset with `needsAcceptance == true`: a new version that requires acceptance, or none accepted yet on this installation.
-
-```swift
-for document in status.pendingLegal {
-    // show document.title, link document.url, then when the user accepts:
-    await appControl.accept(document)
-}
-```
-
-`accept(_:)` posts the kind, version, installation id, platform, locale and app version. It never throws: offline, the acceptance is kept in `UserDefaults` and sent again before the next `status()` that asks the server. Either way, `status()` and `statusUpdates()` report `needsAcceptance == false` from then on, so the app doesn't ask again.
-
-The gate can do it for you:
+`appControl.installationLabel` is a short label for this installation, e.g. `a1b2c3d4` (8 hex characters), or `nil` before the first answer from the server. It's the label the app's **Stats → Recent installations** shows, so it's how you find this device there. Show it in the app's Settings or About screen:
 
 ```swift
-ContentView().appControlGate(appControl, legal: true)
-```
-
-It shows a sheet the user cannot dismiss, listing the documents to accept with links to read them and one "Accept" button. The texts (`legalTitle`, `legalMessage`, `legalVersion`, `legalAcceptButton`) are in English and Italian and can be overridden through `AppControlGateTexts`. The sheet waits while a required update or a blocking maintenance is on screen.
-
-### Installation id for GDPR requests
-
-Only a hash of the installation id is stored with an acceptance. To see or erase a user's acceptances, the admin needs that id, so let the user find it without cluttering the UI: 5 taps within about 3 seconds on the label that shows the app version reveal `installationId()` with a Copy button.
-
-```swift
-struct VersionLabel: View {
-    let appControl: AppControl
-    @State private var taps: [Date] = []
-    @State private var installationId: String?
-
-    var body: some View {
-        Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
-            .onTapGesture {
-                let now = Date()
-                taps = taps.filter { now.timeIntervalSince($0) < 3 } + [now]
-                guard taps.count >= 5 else { return }
-                taps = []
-                Task { installationId = await appControl.installationId() }
-            }
-            .alert("Installation ID", isPresented: .constant(installationId != nil), presenting: installationId) { id in
-                Button("Copy") { UIPasteboard.general.string = id; installationId = nil } // iOS; NSPasteboard on macOS
-                Button("Close", role: .cancel) { installationId = nil }
-            } message: { id in
-                Text("\(id)\n\nShare it with us to see or erase your data.")
-            }
+Section("About") {
+    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")")
+    if let label = appControl.installationLabel {
+        Text("ID \(label)").font(.footnote.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
     }
 }
 ```
 
+It is stored in `UserDefaults` and updated from each answer of the server, so reading it never waits for the network and works offline. It is `nonisolated`: no `await` needed.
+
+## Legal documents
+
+`status.legal` lists the app's legal documents in force (privacy, terms, cookie, EULA) in the requested locale: `kind`, `version`, `title`, `url` (the hosted page), `updatedAt`, `requiresAcceptance` and `acceptFrom`.
+
+- **Link them** in the app, e.g. Settings → Privacy:
+
+  ```swift
+  ForEach(status.legal) { document in
+      if let url = document.url { Link(document.title, destination: url) }
+  }
+  ```
+
+- **Acceptance belongs to your backend.** app-control doesn't record who accepted what. If the app has its own backend and accounts, store the version each user accepted there; `acceptFrom` is the lowest version a user must have accepted (`nil` when no version asks for acceptance). When the stored version is lower than `acceptFrom`, ask the user to accept again.
+
+Decoding is tolerant: a malformed document is dropped, never the whole answer.
+
 ## Privacy
 
-The SDK sends the app's version, build, channel, language, platform and system version, plus a random installation id made on the first run. That id is never linked to the user, the device or an advertising id; it only places the installation in a rollout bucket. The SDK stores nothing else on the device but that id, the last answer and the acceptances not yet delivered, and collects no IP address or user data. An acceptance adds the document's kind and version; the server keeps only a hash of the installation id.
+The SDK sends the app's version, build, channel, language, platform and system version, plus a random installation id made on the first run. The server keeps only a per-app hash of that id, never an IP address, and only for the workspace's retention period (12 months by default). The id is never linked to the user, the device or an advertising id. On the device the SDK stores only that id, its short label and the last answer.
 
-A sentence for your privacy policy: *"To tell you about updates and maintenance, the app sends its version and a random installation identifier to our update service. This identifier is not linked to you or your device."*
+A sentence for your privacy policy: *"To tell you about updates and maintenance, the app sends its version and a random installation identifier to our update service. The service keeps only a per-app hash of that identifier, with no IP address, for a limited period. It is not linked to you or your device."*
 
 ## Development
 

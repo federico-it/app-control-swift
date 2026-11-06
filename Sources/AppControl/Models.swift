@@ -124,25 +124,27 @@ public struct LegalDocument: Codable, Sendable, Equatable, Hashable, Identifiabl
     public var url: URL?
     /// When this version was published.
     public var updatedAt: Date?
-    /// Installations must accept this document (this version or an earlier one that had the flag).
+    /// Users must accept this document (this version or an earlier one asked for acceptance).
     public var requiresAcceptance: Bool
-    /// `true`: this installation has to accept this version. `nil` when the server could not tell.
-    public var needsAcceptance: Bool?
+    /// The lowest version a user must have accepted, or `nil` when no version asks for acceptance.
+    /// app-control doesn't record acceptances: your backend stores the version each user accepted
+    /// and asks again when the stored version is lower than `acceptFrom`.
+    public var acceptFrom: Int?
 
     public var id: String { "\(kind)#\(version)" }
 
     public init(kind: String, version: Int, title: String, url: URL? = nil, updatedAt: Date? = nil,
-                requiresAcceptance: Bool = false, needsAcceptance: Bool? = nil) {
+                requiresAcceptance: Bool = false, acceptFrom: Int? = nil) {
         self.kind = kind
         self.version = version
         self.title = title
         self.url = url
         self.updatedAt = updatedAt
         self.requiresAcceptance = requiresAcceptance
-        self.needsAcceptance = needsAcceptance
+        self.acceptFrom = acceptFrom
     }
 
-    private enum CodingKeys: String, CodingKey { case kind, version, title, url, updatedAt, requiresAcceptance, needsAcceptance }
+    private enum CodingKeys: String, CodingKey { case kind, version, title, url, updatedAt, requiresAcceptance, acceptFrom }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -158,7 +160,7 @@ public struct LegalDocument: Codable, Sendable, Equatable, Hashable, Identifiabl
         url = c.lenientString(.url).flatMap(URL.init(string:))
         updatedAt = c.lenientDate(.updatedAt)
         requiresAcceptance = ((try? c.decodeIfPresent(Bool.self, forKey: .requiresAcceptance)) ?? nil) ?? false
-        needsAcceptance = (try? c.decodeIfPresent(Bool.self, forKey: .needsAcceptance)) ?? nil
+        acceptFrom = ((try? c.decodeIfPresent(Int.self, forKey: .acceptFrom)) ?? nil).flatMap { $0 >= 1 ? $0 : nil }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -169,7 +171,7 @@ public struct LegalDocument: Codable, Sendable, Equatable, Hashable, Identifiabl
         try c.encodeIfPresent(url?.absoluteString, forKey: .url)
         try c.encodeIfPresent(updatedAt.map(ISODate.format), forKey: .updatedAt)
         try c.encode(requiresAcceptance, forKey: .requiresAcceptance)
-        try c.encodeIfPresent(needsAcceptance, forKey: .needsAcceptance)
+        try c.encodeIfPresent(acceptFrom, forKey: .acceptFrom)
     }
 }
 
@@ -190,8 +192,8 @@ public struct AppStatus: Codable, Sendable, Equatable {
     public var maintenance: Maintenance?
     /// The next window starting within 7 days.
     public var upcomingMaintenance: Maintenance?
-    /// The app's published legal documents. Show the ones with `needsAcceptance == true` and call
-    /// `AppControl.accept(_:)` when the user accepts.
+    /// The app's legal documents in force, with their hosted pages. Link them in the app
+    /// (e.g. Settings → Privacy); a backend with accounts compares `acceptFrom` with what each user accepted.
     public var legal: [LegalDocument]
     /// Seconds to wait before asking again.
     public var checkAfter: Int
@@ -218,9 +220,6 @@ public struct AppStatus: Codable, Sendable, Equatable {
     }
 
     static let defaultCheckAfter = 300
-
-    /// The documents this installation still has to accept.
-    public var pendingLegal: [LegalDocument] { legal.filter { $0.needsAcceptance == true } }
 
     /// True when both answers say the same thing (ignoring `source` and `fetchedAt`).
     public func hasSameContent(as other: AppStatus) -> Bool {

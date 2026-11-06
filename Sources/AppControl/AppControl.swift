@@ -27,6 +27,8 @@ public actor AppControl {
     private let locale: String?
     private let defaults: UserDefaults
     private let session: URLSession
+    /// Where the installation label is kept, readable without `await`.
+    private let labelStore: LabelStore
 
     /// The last answer returned, kept in memory for `checkAfter` reuse.
     private var last: (status: AppStatus, query: String)?
@@ -50,6 +52,7 @@ public actor AppControl {
         self.channelOverride = channel
         self.locale = Self.sanitizedLocale(locale ?? Locale.preferredLanguages.first ?? Locale.current.identifier)
         self.defaults = defaults ?? .standard
+        self.labelStore = LabelStore(defaults: self.defaults, key: "appcontrol.installationLabel.\(key)")
         if let session {
             self.session = session
         } else {
@@ -67,11 +70,6 @@ public actor AppControl {
     /// The current status. Reuses the last answer while younger than its `checkAfter`, unless `force` is true.
     /// Never throws: offline it returns the cached answer (`source: .cache`) or a neutral one (`source: .default`).
     public func status(force: Bool = false) async -> AppStatus {
-        applyAcceptances(await fetchStatus(force: force))
-    }
-
-    /// The status as the server (or the cache) says it, before local acceptances are applied.
-    private func fetchStatus(force: Bool) async -> AppStatus {
         let items = await queryItems()
         let fingerprint = Self.fingerprint(items)
         let now = Date()
@@ -80,9 +78,6 @@ public actor AppControl {
             return reusable
         }
 
-        // Acceptances queued while offline go first, so this answer already reflects them.
-        await flushAcceptances()
-        let requestStart = Date()
         let cached = readCache()
         do {
             var request = URLRequest(url: try statusURL(items), cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Self.timeout)
@@ -98,14 +93,14 @@ public actor AppControl {
                 status.source = .network
                 status.fetchedAt = now
                 writeCache(CacheEntry(etag: http.value(forHTTPHeaderField: "ETag") ?? cached.etag, body: cached.body, fetchedAt: now, query: fingerprint))
-                forgetConfirmedAcceptances(before: requestStart)
+                storeInstallationLabel(from: cached.body)
                 return remember(status, fingerprint)
             case 200:
                 var status = try Self.decode(data)
                 status.source = .network
                 status.fetchedAt = now
                 writeCache(CacheEntry(etag: http.value(forHTTPHeaderField: "ETag"), body: data, fetchedAt: now, query: fingerprint))
-                forgetConfirmedAcceptances(before: requestStart)
+                storeInstallationLabel(from: data)
                 return remember(status, fingerprint)
             default:
                 throw URLError(.badServerResponse)
@@ -133,57 +128,36 @@ public actor AppControl {
     /// The `.appControlGate(_:)` modifier does this for you.
     public nonisolated func statusUpdates() -> AsyncStream<AppStatus> {
         AsyncStream { continuation in
-            let id = UUID()
-            let previous = LockedValue<AppStatus?>(nil)
-            // Yields only when the content changes; also called after `accept(_:)`.
-            let emit: @Sendable (AppStatus) -> Void = { status in
-                let changed = previous.update { last -> Bool in
-                    defer { last = status }
-                    return last.map { !$0.hasSameContent(as: status) } ?? true
-                }
-                if changed { continuation.yield(status) }
-            }
             let task = Task { [self] in
-                await self.addWatcher(id, emit)
+                var previous: AppStatus?
                 while !Task.isCancelled {
                     let status = await self.status()
                     if Task.isCancelled { break }
-                    emit(status)
+                    // Yields only when the content changes.
+                    if previous.map({ !$0.hasSameContent(as: status) }) ?? true { continuation.yield(status) }
+                    previous = status
                     let seconds = max(status.checkAfter, Self.minimumInterval)
                     try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
                 }
-                await self.removeWatcher(id)
                 continuation.finish()
             }
-            continuation.onTermination = { _ in
-                task.cancel()
-                Task { await self.removeWatcher(id) }
-            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    /// Records that the user accepted `document`. Never throws.
+    /// The short label of this installation, e.g. `a1b2c3d4` (8 hex characters), or `nil` before the
+    /// first answer from the server.
     ///
-    /// It posts to `/api/v1/public/legal/acceptances` with the installation id, platform, locale and app
-    /// version. On failure the acceptance is kept on the device and sent again before the next `status()`
-    /// that asks the server. Either way, from now on `status()` and `statusUpdates()` mark the document
-    /// `needsAcceptance = false`, so the app doesn't ask again.
-    public func accept(_ document: LegalDocument) async {
-        var state = readLegalState()
-        let entry = Acceptance(kind: document.kind, version: document.version, locale: locale,
-                               appVersion: Self.isValidVersion(version) ? version : nil, at: Date())
-        state.pending.removeAll { $0.kind == entry.kind && $0.version == entry.version }
-        state.pending.append(entry)
-        writeLegalState(state)
-        notifyWatchers()
-        await flushAcceptances()
-    }
-
-    /// The acceptances not delivered to the server yet.
-    public func pendingAcceptanceCount() -> Int { readLegalState().pending.count }
+    /// It is the same label the app's Stats → Recent installations shows, so show it in the app's
+    /// Settings or About screen ("ID a1b2c3d4"): it's how the developer finds this device.
+    /// It is stored on the device and updated from each answer of the server, so reading it never
+    /// waits for the network and works offline; it's `nonisolated`, so no `await` is needed:
+    ///
+    ///     Text("ID \(appControl.installationLabel ?? "–")")
+    public nonisolated var installationLabel: String? { labelStore.value }
 
     /// A random id made once and stored on this device. It is never linked to the user or the device:
-    /// it only places this installation in a rollout bucket.
+    /// it places this installation in a rollout bucket and, hashed per app, counts it in the stats.
     public func installationId() -> String {
         let storageKey = "appcontrol.installation"
         if let existing = defaults.string(forKey: storageKey), Self.isValidInstallation(existing) { return existing }
@@ -344,161 +318,35 @@ public actor AppControl {
         return nil
     }
 
-    // MARK: Legal acceptances
+    // MARK: Installation label
 
-    struct Acceptance: Codable, Equatable {
-        var kind: String
-        var version: Int
-        var locale: String?
-        var appVersion: String?
-        /// When accepted (pending) or when delivered (sent).
-        var at: Date
+    private struct LabelBody: Decodable { var installation: String? }
+
+    /// Keeps the `installation` label of a server answer. A missing or malformed one leaves the stored label.
+    private func storeInstallationLabel(from body: Data) {
+        guard let label = (try? JSONDecoder().decode(LabelBody.self, from: body))?.installation,
+              Self.isValidLabel(label) else { return }
+        labelStore.value = label
     }
 
-    /// `pending`: not delivered yet. `sent`: delivered, kept until an answer from the server reflects them.
-    struct LegalState: Codable, Equatable {
-        var pending: [Acceptance] = []
-        var sent: [Acceptance] = []
-    }
-
-    struct AcceptanceBody: Codable, Equatable {
-        var key: String
-        var installation: String
-        var kind: String
-        var version: Int
-        var platform: String
-        var locale: String?
-        var appVersion: String?
-    }
-
-    private enum Delivery { case delivered, rejected, failed }
-
-    private var legalKey: String { "appcontrol.legal.\(key)" }
-    private var flushing = false
-    private var watchers: [UUID: @Sendable (AppStatus) -> Void] = [:]
-
-    func readLegalState() -> LegalState {
-        guard let data = defaults.data(forKey: legalKey) else { return LegalState() }
-        return (try? JSONDecoder().decode(LegalState.self, from: data)) ?? LegalState()
-    }
-
-    private func writeLegalState(_ state: LegalState) {
-        if state.pending.isEmpty && state.sent.isEmpty {
-            defaults.removeObject(forKey: legalKey)
-        } else if let data = try? JSONEncoder().encode(state) {
-            defaults.set(data, forKey: legalKey)
-        }
-    }
-
-    /// Marks the documents accepted on this device (delivered or not) as not needing acceptance.
-    private func applyAcceptances(_ status: AppStatus) -> AppStatus {
-        guard status.legal.contains(where: { $0.needsAcceptance == true }) else { return status }
-        let state = readLegalState()
-        let local = state.pending + state.sent
-        guard !local.isEmpty else { return status }
-        var result = status
-        for index in result.legal.indices where result.legal[index].needsAcceptance == true {
-            let document = result.legal[index]
-            if local.contains(where: { $0.kind == document.kind && $0.version >= document.version }) {
-                result.legal[index].needsAcceptance = false
-            }
-        }
-        return result
-    }
-
-    /// Sends the pending acceptances, oldest first. Delivered ones move to `sent`; the ones the server
-    /// refuses for good (unknown key, version not in force) are dropped; the others stay queued.
-    private func flushAcceptances() async {
-        guard !flushing else { return }
-        flushing = true
-        defer { flushing = false }
-        var attempted: [Acceptance] = []
-        while let next = readLegalState().pending.first(where: { !attempted.contains($0) }) {
-            attempted.append(next)
-            let outcome = await deliver(next)
-            if outcome == .failed { continue }
-            var state = readLegalState()
-            state.pending.removeAll { $0 == next }
-            if outcome == .delivered {
-                var sent = next
-                sent.at = Date()
-                state.sent.removeAll { $0.kind == sent.kind && $0.version == sent.version }
-                state.sent.append(sent)
-            }
-            writeLegalState(state)
-        }
-    }
-
-    private func deliver(_ acceptance: Acceptance) async -> Delivery {
-        do {
-            var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/public/legal/acceptances"),
-                                     cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Self.timeout)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            request.httpBody = try JSONEncoder().encode(acceptanceBody(acceptance))
-            let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return .failed }
-            switch http.statusCode {
-            case 200..<300: return .delivered
-            case 408, 429: return .failed
-            case 400..<500: return .rejected
-            default: return .failed
-            }
-        } catch {
-            return .failed
-        }
-    }
-
-    func acceptanceBody(_ acceptance: Acceptance) -> AcceptanceBody {
-        AcceptanceBody(key: key, installation: installationId(), kind: acceptance.kind, version: acceptance.version,
-                       platform: Self.platform, locale: acceptance.locale, appVersion: acceptance.appVersion)
-    }
-
-    /// A network answer whose request started after an acceptance was delivered already reflects it.
-    private func forgetConfirmedAcceptances(before date: Date) {
-        var state = readLegalState()
-        let count = state.sent.count
-        state.sent.removeAll { $0.at <= date }
-        if state.sent.count != count { writeLegalState(state) }
-    }
-
-    private func addWatcher(_ id: UUID, _ watcher: @escaping @Sendable (AppStatus) -> Void) { watchers[id] = watcher }
-    private func removeWatcher(_ id: UUID) { watchers[id] = nil }
-
-    /// Gives the `statusUpdates()` streams the last answer with the local acceptances applied.
-    private func notifyWatchers() {
-        guard !watchers.isEmpty else { return }
-        let base: AppStatus
-        if let last {
-            base = last.status
-        } else if let cached = readCache(), var status = try? Self.decode(cached.body) {
-            status.source = .cache
-            status.fetchedAt = cached.fetchedAt
-            base = status
-        } else {
-            return
-        }
-        let status = applyAcceptances(base)
-        for watcher in watchers.values { watcher(status) }
-    }
-
-    /// The versions the API takes as `appVersion`: `1`, `2.3`, `v2.3.1`, `1.2.3.4`.
-    static func isValidVersion(_ value: String) -> Bool {
-        value.range(of: #"^[vV]?\d{1,9}(\.\d{1,9}){0,3}$"#, options: .regularExpression) != nil
+    static func isValidLabel(_ label: String) -> Bool {
+        (1...64).contains(label.count) && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
     }
 }
 
-/// A value behind a lock, shared between a stream and its producers.
-final class LockedValue<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
+/// The stored installation label. `UserDefaults` is thread-safe, so reading it outside the actor is fine.
+final class LabelStore: @unchecked Sendable {
+    private let defaults: UserDefaults
+    private let key: String
 
-    init(_ value: Value) { self.value = value }
+    init(defaults: UserDefaults, key: String) {
+        self.defaults = defaults
+        self.key = key
+    }
 
-    func update<Result>(_ body: (inout Value) -> Result) -> Result {
-        lock.lock()
-        defer { lock.unlock() }
-        return body(&value)
+    var value: String? {
+        get { defaults.string(forKey: key) }
+        set { if defaults.string(forKey: key) != newValue { defaults.set(newValue, forKey: key) } }
     }
 }
+
