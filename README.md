@@ -127,3 +127,4 @@ swift test
 
 - [SDK overview: the status endpoint, what the app should show, legal documents](docs/sdk.md)
 - [API tokens: scopes, roles, CI recipes](docs/api-tokens.md)
+- [Webhooks: Slack, Discord and signed URLs](docs/webhooks.md)

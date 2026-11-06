@@ -70,7 +70,22 @@ The SDKs flatten `minimum` to a string (`"2.2.0"`) and add `source` (`network`, 
 The SwiftUI `.appControlGate(appControl)` modifier does all of this but the label; on the web, the JavaScript
 client's README has a React example.
 
-## Legal documents
+## Testing on a device
+
+To see the update and maintenance screens on a real device without publishing anything:
+
+1. Show the installation label in the app's Settings or About screen ("ID a1b2c3d4", see above).
+2. In app-control, open the app's **Versions → Test in app**, enter that label (or pick the device from Stats →
+   Recent installations), choose the environment, the kind (update available, update required, maintenance)
+   and the duration (5–60 minutes), and start. A non-production environment can also be tested as a whole.
+3. Open the app on that device or bring it to the foreground. The answer keeps the same keys with test values:
+   update `9999.0.0` (also the minimum when required) or a blocking maintenance until the test ends.
+   `checkAfter` is at most the time left, so the app returns to normal by itself soon after the end, or as soon
+   as the test is stopped and the app asks again.
+
+The SDKs need no change: a cached answer is reused for up to `checkAfter` seconds, so force a check (or relaunch)
+if the app asked just before the test started.
+
 
 The app's legal documents in force (privacy, terms, cookie, EULA) come in the status answer, in `LEGAL_KINDS`
 order and in the requested locale.
