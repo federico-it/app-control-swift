@@ -12,7 +12,7 @@ iOS 15, macOS 12, tvOS 15, watchOS 8, visionOS 1. No dependencies.
 Swift Package Manager, in Xcode (File → Add Package Dependencies…) or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.3.1"),
+.package(url: "https://github.com/federico-it/app-control-swift.git", from: "0.4.0"),
 ```
 
 The package is developed in the app-control monorepo (`sdks/swift`) and published to
@@ -134,11 +134,20 @@ It is stored in `UserDefaults` and updated from each answer of the server, so re
 
 Decoding is tolerant: a malformed document is dropped, never the whole answer.
 
+## What is sent
+
+One `GET /api/v1/public/status` with: `key`, `platform`, `version`, `build`, `channel`, `locale`, `installation` (the random id), `os` (major.minor), `model` and `sdk`.
+
+- `model` is the hardware identifier, detected once: `utsname.machine` on a device (`iPhone16,1`), `SIMULATOR_MODEL_IDENTIFIER` in the simulator, `hw.model` on a Mac, Mac Catalyst or an iPad app on a Mac (`Mac14,2`). Omitted when unknown.
+- `sdk` is `swift/0.4.0` (`AppControl.sdkVersion`).
+
+Both feed the app's **Stats → In-app** (Devices and SDK sections) and never change the answer.
+
 ## Privacy
 
-The SDK sends the app's version, build, channel, language, platform and system version, plus a random installation id made on the first run. The server keeps only a per-app hash of that id, never an IP address, and only for the workspace's retention period (12 months by default). The id is never linked to the user, the device or an advertising id. On the device the SDK stores only that id, its short label and the last answer.
+The SDK sends the app's version, build, channel, language, platform, system version and device model, plus a random installation id made on the first run. The device model is the hardware identifier shared by every device of that model (`iPhone16,1`): no device name, serial number or user data. The server keeps only a per-app hash of that id, never an IP address, and only for the workspace's retention period (12 months by default). The id is never linked to the user, the device or an advertising id. On the device the SDK stores only that id, its short label and the last answer.
 
-A sentence for your privacy policy: *"To tell you about updates and maintenance, the app sends its version and a random installation identifier to our update service. The service keeps only a per-app hash of that identifier, with no IP address, for a limited period. It is not linked to you or your device."*
+A sentence for your privacy policy: *"To tell you about updates and maintenance, the app sends its version, device model and a random installation identifier to our update service. The service keeps only a per-app hash of that identifier, with no IP address, for a limited period. It is not linked to you or your device."*
 
 ## Development
 

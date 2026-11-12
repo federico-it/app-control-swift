@@ -11,6 +11,9 @@ import StoreKit
 ///     let status = await appControl.status()
 ///     if status.update == .required { … }
 public actor AppControl {
+    /// This SDK's version, sent as `sdk=swift/<sdkVersion>`.
+    public static let sdkVersion = "0.4.0"
+
     public static let defaultBaseURL = URL(string: "https://app-control.srvly.it")!
 
     /// The request timeout, in seconds.
@@ -222,6 +225,49 @@ public actor AppControl {
         return "\(os.majorVersion).\(os.minorVersion)"
     }
 
+    /// The hardware model identifier (`iPhone16,1`, `Mac14,2`), computed once; `nil` when unknown.
+    /// Only the model is sent: no name, serial number or other device data.
+    static let deviceModel: String? = {
+        let raw = rawDeviceModel().trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = String(raw.prefix(64))
+        return model.isEmpty ? nil : model
+    }()
+
+    private static func rawDeviceModel() -> String {
+        #if targetEnvironment(simulator)
+        if let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"], !model.isEmpty {
+            return model
+        }
+        #endif
+        #if os(macOS) || targetEnvironment(macCatalyst)
+        return sysctlString("hw.model") ?? machine()
+        #else
+        // An iPad app on a Mac with Apple silicon reports an iPad model in `machine`; `hw.model` is the Mac.
+        if ProcessInfo.processInfo.isiOSAppOnMac, let model = sysctlString("hw.model") {
+            return model
+        }
+        return machine()
+        #endif
+    }
+
+    /// `utsname.machine`: the hardware identifier on a device (`iPhone16,1`).
+    private static func machine() -> String {
+        var info = utsname()
+        guard uname(&info) == 0 else { return "" }
+        return withUnsafeBytes(of: &info.machine) { buffer in
+            String(decoding: buffer.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+    }
+
+    private static func sysctlString(_ name: String) -> String? {
+        var size = 0
+        guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctlbyname(name, &buffer, &size, nil, 0) == 0 else { return nil }
+        let value = String(decoding: buffer.prefix(while: { $0 != 0 }), as: UTF8.self)
+        return value.isEmpty ? nil : value
+    }
+
     func queryItems() async -> [URLQueryItem] {
         var items: [URLQueryItem] = [
             URLQueryItem(name: "key", value: key),
@@ -233,6 +279,8 @@ public actor AppControl {
         if let locale { items.append(URLQueryItem(name: "locale", value: locale)) }
         items.append(URLQueryItem(name: "installation", value: installationId()))
         items.append(URLQueryItem(name: "os", value: Self.osVersion))
+        if let model = Self.deviceModel { items.append(URLQueryItem(name: "model", value: model)) }
+        items.append(URLQueryItem(name: "sdk", value: "swift/\(Self.sdkVersion)"))
         return items
     }
 

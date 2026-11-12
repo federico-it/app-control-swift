@@ -114,6 +114,12 @@ final class AppControlTests: XCTestCase {
         XCTAssertEqual(q["channel"], "testflight")
         XCTAssertEqual(q["locale"], "it-IT")
         XCTAssertNotNil(q["os"]?.range(of: #"^\d+\.\d+$"#, options: .regularExpression))
+        XCTAssertEqual(q["sdk"], "swift/\(AppControl.sdkVersion)")
+        XCTAssertNotNil(q["sdk"]?.range(of: #"^swift/\d+\.\d+\.\d+$"#, options: .regularExpression))
+        // On a Mac host `hw.model` is always there (`Mac14,2`, `MacBookPro18,3`).
+        let model = try XCTUnwrap(q["model"])
+        XCTAssertNotNil(model.range(of: "^[A-Za-z0-9,._-]{1,64}$", options: .regularExpression))
+        XCTAssertEqual(model, AppControl.deviceModel)
         let installation = await client.installationId()
         XCTAssertEqual(q["installation"], installation)
         XCTAssertNotNil(installation.range(of: "^[A-Za-z0-9_-]{8,128}$", options: .regularExpression))

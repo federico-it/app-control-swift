@@ -14,11 +14,29 @@ secret: it only identifies the environment.
 ## The endpoint
 
 ```
-GET {baseURL}/api/v1/public/status?key=&platform=&version=&build=&channel=&locale=&installation=&os=
+GET {baseURL}/api/v1/public/status?key=&platform=&version=&build=&channel=&locale=&installation=&os=&model=&sdk=
 ```
 
 No user authentication, CORS open (`*`, no credentials), weak `ETag` with `If-None-Match` → 304. The full
 contract is in the API reference of your app-control server (`/docs`, audience `public`).
+
+Two optional parameters feed the app's stats only (they never change the answer). The server records them
+when valid and silently ignores them otherwise, never a 400:
+
+| Parameter | Value | Swift (0.4.0+) | JS (0.2.0+) |
+|---|---|---|---|
+| `model` | Hardware identifier, at most 64 characters of `A-Z a-z 0-9 , . _ -` (`iPhone16,1`, `iPad14,3`, `Mac14,2`, `RealityDevice14,1`, `Watch7,1`, `AppleTV14,1`) | Detected once: `utsname.machine` on a device, `SIMULATOR_MODEL_IDENTIFIER` in the simulator, `sysctlbyname("hw.model")` on macOS, Mac Catalyst and iPad apps on a Mac. Omitted when empty. | Never detected: sent only when the `model` option is passed. |
+| `sdk` | `swift/<version>` or `js/<version>` | Always `swift/0.4.0` (`AppControl.sdkVersion`) | Always `js/0.2.0` (`SDK_VERSION`) |
+
+Older SDKs send neither: their installations count as **unknown** (device "Model not sent", SDK "not reported").
+
+## Stats
+
+What the SDKs send drives the app's **Stats → In-app** sections, all over the installations active in the last
+30 days: **Usage** (today), **OS** (system versions per platform, with the "Raise the minimum target?"
+simulation), **Devices** (top models per platform, from `model`), **Channels** (store, TestFlight, debug),
+**Locales** and **SDK** (latest, outdated or unknown, from `sdk`). The workspace's Stats have the same
+breakdowns across apps in the **Platforms** tab.
 
 ```json
 {
